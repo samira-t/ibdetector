@@ -1,87 +1,70 @@
-package logger
+package akka.logger
 import scala.collection.mutable.HashMap
 import akka.actor.{ ActorRef, Actor, UntypedChannel }
 import akka.event.{ EventHandler }
-import akka.logger.LogActorRef
+import scala.collection.mutable.ArrayBuffer
 
-sealed abstract class Source
-class ActorSource(val actorName: String) extends Source {
-  override def toString = {
-    actorName
-  }
-}
-class CallerSource(val className: String, val methodName: String) extends Source {
-  override def toString = {
-    className + "::" + methodName
-  }
-}
 
 
 object Logger {
 
   // possible to have a list of listeners in the future
-  val defaultListener = Actor.actorOf[DefaultListener].start()
+  //val defaultListener = Actor.actorOf[DefaultListener].start()
+  
+  val traceAnalyzer = Actor.actorOf[TraceAnalyzer].start()
 
-  sealed trait ActorEvent
-  case class Started(actor: ActorRef) extends ActorEvent
-  case class Stopped(actor: ActorRef) extends ActorEvent
-  case class Sent(source: UntypedChannel, message: Any, destination: UntypedChannel) extends ActorEvent
-  case class Forwarded(source: UntypedChannel, message: Any, destination: ActorRef) extends ActorEvent
-  case class Received(message: Any, actor: ActorRef) extends ActorEvent
 
-  def stopped(implicit actor: ActorRef) = defaultListener ! Stopped(actor)
+  def stopped(implicit actor: ActorRef) = traceAnalyzer ! Stopped(actor)
 
-  def started(implicit actor: ActorRef) = defaultListener ! Started(actor)
+  def started(implicit actor: ActorRef) = traceAnalyzer ! Started(actor)
 
-  def sent(sender: UntypedChannel, message: Any = "")(implicit actor: ActorRef, vc:HashMap[UntypedChannel,Int]) {
-    defaultListener ! Sent(sender, message, actor)
+  def sent(sender: UntypedChannel, message: Any)(implicit actor: UntypedChannel, vc: HashMap[ActorRef,Int]) {
+    traceAnalyzer ! Sent(sender, message, actor, vc)
   }
 
-  def received(message: Any = "")(implicit actor: ActorRef, vc:HashMap[UntypedChannel,Int]){
-    defaultListener ! Received(message, actor)
+  def received(sender:UntypedChannel, message: Any)(implicit actor: LogActorRef, vc:HashMap[ActorRef,Int]){
+    traceAnalyzer ! Received(sender,message, actor, actor.getVectorClock)
+  }
+  
+  def changedNullFields(receiver:LogActorRef, vc:HashMap[ActorRef,Int], changedFields:ArrayBuffer[String]){
+    println("changed null", receiver, vc, changedFields.mkString(";"))
   }
 
-  def forwarded(sender: UntypedChannel, message: Any = "")(implicit actor: ActorRef, vc:HashMap[UntypedChannel,Int]) {
-    defaultListener ! Forwarded(sender, message, actor)
-  }
 
-  def printGraph() {
-//    defaultListener ! Export
-  }
 
   def shutdown() {
-    defaultListener.stop()
+    traceAnalyzer.stop()
   }
 
-  class DefaultListener extends Actor {
-
-    //private val actorGraph = new Graph
-    private var vc = new HashMap[UntypedChannel, Int]()
-
-    def receive = {
-
-      case Started(actor) ⇒
-        println("Started " + simpleName(actor))
-        vc.+=(actor->0)
-
-      // add the actor to the graph
-      //actorGraph + ActorVertex(simpleName(actor))
-
-      case Stopped(actor) =>
-        vc.-=(actor)
-        println("Stopped " + simpleName(actor))
-
-      case Sent(sender, message, actor) =>
-        val clock = vc.get(sender)
-
-        
-      case e: Forwarded ⇒ //processOutgoing(e)
-
-      case Received(message, actor) ⇒
-        println(simpleName(actor) + " received message " + simpleName(message))
-        if (actor.isInstanceOf[LogActorRef]) println("vc = "+ actor.asInstanceOf[LogActorRef].getVC)
-
-    }
+//  class DefaultListener extends Actor {
+//
+//    //private val actorGraph = new Graph
+//    private var vc = new HashMap[UntypedChannel, Int]()
+//
+////    def receive = {
+////
+////      case Started(actor) ⇒
+////        println("Started " + simpleName(actor))
+////        vc.+=(actor->0)
+////
+////      // add the actor to the graph
+////      //actorGraph + ActorVertex(simpleName(actor))
+////
+////      case Stopped(actor) =>
+////        vc.-=(actor)
+////        println("Stopped " + simpleName(actor))
+////
+////      case Sent(message, actor) =>
+////        val clock = vc.get(sender)
+////
+////        
+////      case e: Forwarded ⇒ //processOutgoing(e)
+////
+////      case Received(message, actor) ⇒
+////        println(simpleName(actor) + " received message " + simpleName(message))
+////        if (actor.isInstanceOf[LogActorRef]) println("vc = "+ actor.asInstanceOf[LogActorRef].getVC)
+////
+////    }
 
 /*    private def processOutgoing(event: ActorEvent) = {
       val (source, message, actor, isForward) = event match {
@@ -106,8 +89,8 @@ object Logger {
       actorGraph + sourceVertex + destVertex + edge
     }
 */
-    private def simpleName(instance: Any): String = {
-      instance.asInstanceOf[AnyRef].getClass.getSimpleName
-    }
-  }
+//    private def simpleName(instance: Any): String = {
+//      instance.asInstanceOf[AnyRef].getClass.getSimpleName
+//    }
+//  }
 }

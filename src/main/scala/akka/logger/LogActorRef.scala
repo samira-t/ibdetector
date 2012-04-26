@@ -1,18 +1,18 @@
 package akka.logger
 import scala.collection.mutable.HashMap
-
+import scala.collection.mutable.ArrayBuffer
+import java.lang.reflect.Field
 import java.net.InetSocketAddress
 import akka.dispatch.{ MessageInvocation, ActorCompletableFuture }
-import logger.{ CallerSource, ActorSource, Source, Logger }
 import akka.actor._
 
 class LogActorRef(private[this] val actorFactory: () ⇒ Actor,
                   val _homeAddress: Option[InetSocketAddress]) extends LocalActorRef(actorFactory, _homeAddress) {
 
   private implicit def unnderlyingActor = this.actor
-  private implicit var vc = new HashMap[UntypedChannel, Int]()
-  private implicit def ref = this
-  private var isForward = false
+  private implicit val logActorRef = this
+  @volatile
+  private var actorVC = new ActorVectorClock
 
   override def start(): this.type = {
     val ret = super.start()
@@ -24,83 +24,96 @@ class LogActorRef(private[this] val actorFactory: () ⇒ Actor,
     Logger.stopped
   }
 
-  override def forward(message: Any)(implicit channel: ForwardableChannel) = {
-    isForward = true
-    super.forward(message)(channel)
-    Logger.forwarded(channel, message)
-    isForward = false
-  }
-
-  def !(message: Any)(implicit channel: UntypedChannel, actor: LogActorRef): Unit = {
-    if (actor != null) {
-      val vc = actor.vc
-      actor.incVC();
-      super.!(MessageWvc(message, vc))(channel)
-    } else {
-      super.!(message, vc)(channel)
-    }
-  }
-
-  def ?(message: Any)(implicit channel: UntypedChannel, timeout: Actor.Timeout, actor: LogActorRef): ActorCompletableFuture = {
-    if (actor != null) {
-      super.?(MessageWvc(message, actor.vc))(channel, timeout)
-    } else super.?(message)(channel, timeout)
-  }
-
   override def postMessageToMailbox(message: Any, channel: UntypedChannel): Unit = {
-    super.postMessageToMailbox(message, channel)
-    if (!isForward) Logger.sent(channel, message)
+    var senderVC: HashMap[ActorRef,Int] = null
+    if (channel.isInstanceOf[LogActorRef]) {
+      channel.asInstanceOf[LogActorRef].incVC()
+      senderVC = channel.asInstanceOf[LogActorRef].getVectorClock
+    }
+    super.postMessageToMailbox(LogMessage(message,senderVC), channel)
+    Logger.sent(channel, message)(this,senderVC)
   }
 
   override def postMessageToMailboxAndCreateFutureResultWithTimeout(
     message: Any,
     timeout: Long,
     channel: UntypedChannel): ActorCompletableFuture = {
-    val ret = super.postMessageToMailboxAndCreateFutureResultWithTimeout(message, timeout, channel)
-    if (!isForward) Logger.sent(channel, message)
-    ret
+
+    if (isClientManaged_?) {
+      val chSender = channel match {
+        case ref: ActorRef ⇒ Some(ref)
+        case _             ⇒ None
+      }
+      val chFuture = channel match {
+        case f: ActorCompletableFuture ⇒ Some(f)
+        case _                         ⇒ None
+      }
+      val future = Actor.remote.send[Any](message, chSender, chFuture, homeAddress.get, timeout, false, this, None, ActorType.ScalaActor, None)
+      if (future.isDefined) LogActorCompletableFuture(future.get)
+      else throw new IllegalActorStateException("Expected a future from remote call to actor " + toString)
+    } else {
+      val future = channel match {
+        case f: LogActorCompletableFuture ⇒ f
+        case _                         ⇒ new LogActorCompletableFuture(timeout)(dispatcher, channel)
+      }
+      var senderVC : HashMap[ActorRef,Int] = null
+      if (channel.isInstanceOf[LogActorRef]) {
+        channel.asInstanceOf[LogActorRef].incVC()
+        senderVC = channel.asInstanceOf[LogActorRef].getVectorClock
+        } 
+      dispatcher dispatchMessage new MessageInvocation(this, LogMessage(message,senderVC), future)
+      Logger.sent(channel,message)(channel,senderVC)
+      future
+  }
   }
 
   override def invoke(messageHandle: MessageInvocation): Unit = {
-    try {
-      var msgvc = messageHandle.message.asInstanceOf[MessageWvc]
-      var newVc = msgvc.vc
-
+      var realHandle = messageHandle
+      if (messageHandle.message.isInstanceOf[LogMessage]) 
+        realHandle = MessageInvocation(messageHandle.receiver,messageHandle.message.asInstanceOf[LogMessage].message,messageHandle.channel)
+      var msgvc = messageHandle.message.asInstanceOf[LogMessage].vc
       var actorObject = this.actor
-      actorObject.getClass().getFields()
-      updateVC(newVc)
-      val newHandle = new MessageInvocation(messageHandle.receiver, msgvc.message, messageHandle.channel)
-      super.invoke(newHandle)
-    } finally {
-      Logger.received(messageHandle.message)
-    }
+      var fields = actorObject.getClass().getDeclaredFields()
+      var nullFields = new ArrayBuffer[Field]()
+      var changedNullFields = false
+      for (field <- fields){
+        field.setAccessible(true)
+        if (field.get(actorObject) == null) {
+          nullFields.+=:(field)
+          //println("null",field.getName)
+        }
+        //else println(field,field.get(actorObject))
+      }
+      updateVC(msgvc)
+      incVC()
+      val updatedVC = getVectorClock
+      Logger.received(realHandle.channel,realHandle.message)(this,updatedVC)
+      super.invoke(realHandle)
+      var notNullFields = new ArrayBuffer[String]()
+      for (field <- nullFields ){
+        field.setAccessible(true)
+        if (field.get(actorObject) != null) {
+          //println(" not null",field.getName)
+          changedNullFields = true
+          notNullFields.+=(field.getName())
+        }
+        //else println(field,field.get(actorObject))
+      }
+        if (notNullFields.size>0){
+          println("not size"+notNullFields.size)
+          Logger.changedNullFields(this,updatedVC,notNullFields)
+        }
   }
 
-  def getVC = vc
+  def getVectorClock = actorVC.getVector()
 
-  private def updateVC(newVc: HashMap[UntypedChannel, Int]) = {
-
+  def updateVC(newVC: HashMap[ActorRef,Int]) = {
+    if (newVC != null)
+	  actorVC.update(newVC)
   }
 
   def incVC() {
+    actorVC.increment
 
-  }
-
-  private def callStack = try { sys.error("exception") } catch { case ex ⇒ ex.getStackTrace drop 2 }
-
-  private def senderOrCaller(channel: UntypedChannel): Source = {
-    val ret = channel match {
-      case ref: ActorRef ⇒ new ActorSource(ref.actor.getClass.getSimpleName)
-
-      case _ ⇒
-        // dig through the call stack to find the class
-        val se = callStack(4) //skipping senderOrCaller, postMesssageTo*
-        new CallerSource(stripPackageName(se.getClassName), se.getMethodName)
-    }
-    ret
-  }
-
-  private def stripPackageName(className: String): String = {
-    className.substring(className.lastIndexOf(".") + 1)
   }
 }

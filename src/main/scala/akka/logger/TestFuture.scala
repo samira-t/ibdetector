@@ -8,10 +8,11 @@ import scala.collection.mutable.ListBuffer
 
 class SampleActor(var brother: ActorRef = null) extends Actor {
   var messageOrder = ListBuffer[Any]()
+  var initial : ListBuffer[Any] = _
   def receive = {
-    case msg @ ('m)  ⇒ messageOrder.+=(msg)
-    case msg @ 'req  ⇒ messageOrder.+=(msg); if (brother != null) { val f = brother ? 'req2; f.get }
-    case msg @ 'req2 ⇒ messageOrder.+=(msg); self.reply('reply)
+    case msg @ ('m) ⇒ messageOrder.+=(msg)
+    case msg @ 'req ⇒ messageOrder.+=(msg); if (brother != null) { val f = brother ? 'req2; f.get }
+    case msg @ 'req2 ⇒ messageOrder.+=(msg); initial = new ListBuffer[Any]();self.reply('reply)
 
   }
 }
@@ -23,6 +24,7 @@ object TestSmaple {
     val a = actorOf(new SampleActor()).start
     val b = actorOf(new SampleActor(a)).start
     b ! 'req
+    Thread.sleep(20000)
 
   }
 }
